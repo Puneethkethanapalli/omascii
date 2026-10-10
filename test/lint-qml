@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+# Lint every QML file against the installed Omarchy shell. qs.* imports
+# resolve through a temporary import root that points "qs" at the shell.
+
+set -uo pipefail
+
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
+LINT=${QMLLINT:-$(command -v qmllint || command -v /usr/lib/qt6/bin/qmllint || true)}
+
+if [[ -z $LINT ]]; then
+  echo "qmllint not found (install qt6-declarative)" >&2
+  exit 1
+fi
+
+imports=$(mktemp -d)
+trap 'rm -rf -- "$imports"' EXIT
+ln -s "$OMARCHY_PATH/shell" "$imports/qs"
+
+status=0
+count=0
+while IFS= read -r -d '' file; do
+  count=$((count + 1))
+  out=$("$LINT" -I "$imports" -I "$OMARCHY_PATH/shell" "$file" 2>&1)
+  code=$?
+  if ((code != 0)) || grep -q ':[0-9]*:[0-9]*: Error' <<<"$out"; then
+    echo "qmllint failed for ${file#"$ROOT"/} (exit $code)"
+    echo "$out"
+    status=1
+  fi
+done < <(find "$ROOT" -name '*.qml' -not -path '*/.git/*' -print0)
+
+echo "qmllint checked $count files"
+exit "$status"

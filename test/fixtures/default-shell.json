@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "idle": {
+    "screensaver": 150,
+    "lock": 300
+  },
+  "bar": {
+    "marker": "default-bar",
+    "layout": { "left": [], "center": [], "right": [] }
+  }
+}

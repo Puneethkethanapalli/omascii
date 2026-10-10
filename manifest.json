@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.puneethkethanapalli.omascii",
+  "name": "omascii",
+  "version": "0.1.0",
+  "author": "puneethkethanapalli",
+  "license": "MIT",
+  "description": "Turn your text into ASCII art for the Omarchy screensaver, with screensaver and idle controls in one panel.",
+  "homepage": "https://github.com/puneethkethanapalli/omascii",
+  "repository": "https://github.com/puneethkethanapalli/omascii",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "omascii",
+    "description": "ASCII-art screensaver text and idle controls",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

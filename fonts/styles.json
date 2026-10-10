@@ -1,0 +1,21 @@
+[
+  {"id":"delta-corps-priest-1","name":"Delta Corps Priest","file":"delta-corps-priest-1.flf","unicode":true,"lacks":"!\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`{|}~"},
+  {"id":"ansi-shadow","name":"ANSI Shadow","file":"ansi-shadow.flf","unicode":true,"lacks":"\"'+=\\`{|}~"},
+  {"id":"bloody","name":"Bloody","file":"bloody.flf","unicode":true,"lacks":"\"#$%&'()*+,-/0123456789:;<=>?@[\\]^_`{|}~"},
+  {"id":"dos-rebel","name":"DOS Rebel","file":"dos-rebel.flf","unicode":true,"lacks":""},
+  {"id":"ansi-regular","name":"ANSI Regular","file":"ansi-regular.flf","unicode":true,"lacks":"\"'+=\\`{|}~"},
+  {"id":"electronic","name":"Electronic","file":"electronic.flf","unicode":true,"lacks":"\"&'()+,/:;=?@[\\]_`{|}~"},
+  {"id":"elite","name":"Elite","file":"elite.flf","unicode":true,"lacks":"\"#$%&'()*+,-/0123456789:;<=>?@[\\]^_`{|}~"},
+  {"id":"calvin-s","name":"Calvin S","file":"calvin-s.flf","unicode":true,"lacks":"\"'()+/:;<=>\\`{|}~"},
+  {"id":"kompakt-block","name":"Kompakt Block","file":"kompakt-block.flf","unicode":true,"lacks":""},
+  {"id":"3d-ascii","name":"3D ASCII","file":"3d-ascii.flf","unicode":false,"lacks":"\"'()+=@\\_`{|}~"},
+  {"id":"larry-3d","name":"Larry 3D","file":"larry-3d.flf","unicode":false,"lacks":""},
+  {"id":"star-wars","name":"Star Wars","file":"star-wars.flf","unicode":false,"lacks":""},
+  {"id":"big-money","name":"Big Money","file":"big-money.flf","unicode":false,"lacks":""},
+  {"id":"graffiti","name":"Graffiti","file":"graffiti.flf","unicode":false,"lacks":""},
+  {"id":"big","name":"Big","file":"big.flf","unicode":false,"lacks":""},
+  {"id":"doom","name":"Doom","file":"doom.flf","unicode":false,"lacks":""},
+  {"id":"slant","name":"Slant","file":"slant.flf","unicode":false,"lacks":""},
+  {"id":"standard","name":"Standard","file":"standard.flf","unicode":false,"lacks":""},
+  {"id":"small","name":"Small","file":"small.flf","unicode":false,"lacks":""}
+]

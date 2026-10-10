@@ -1,0 +1,1061 @@
+#!/usr/bin/env bash
+
+# omascii: render text as ASCII art for the Omarchy screensaver, and drive the
+# stock screensaver/idle settings. Every command prints one line of JSON on
+# stdout ({"ok":false,"error":...} plus a non-zero exit on failure), so the
+# bar plugin and the CLI share one implementation.
+
+set -euo pipefail
+export LC_ALL=C.UTF-8
+
+OMASCII_ROOT=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
+PATH="$PATH:$OMARCHY_PATH/bin"
+
+FONTS_DIR="$OMASCII_ROOT/fonts"
+STYLES_JSON="$FONTS_DIR/styles.json"
+ART_FILE="$HOME/.config/omarchy/branding/screensaver.txt"
+DEFAULT_ART="$OMARCHY_PATH/logo.txt"
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+DEFAULT_SHELL_JSON="$OMARCHY_PATH/config/omarchy/shell.json"
+MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+OMARCHY_STATE="$HOME/.local/state/omarchy"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omascii"
+HISTORY_DIR="$STATE_DIR/history"
+HISTORY_INDEX="$STATE_DIR/history.json"
+ORIGINAL_ART="$STATE_DIR/original.txt"
+MENU_CHOICE="$STATE_DIR/menu-choice"
+EFFECTS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omascii/effects.json"
+OMARCHY_SCREENSAVER_FLAG="$OMARCHY_STATE/toggles/screensaver-off"
+# While some effects are switched off, omascii runs the screensaver and holds
+# Omarchy's screensaver-off flag so the stock one stays quiet. These record
+# that hold and the user's own on/off choice during it.
+OWNS_FLAG="$STATE_DIR/owns-screensaver-flag"
+INTENT_OFF="$STATE_DIR/screensaver-off"
+
+MAX_TEXT=48
+HISTORY_LIMIT=20
+SCREENSAVER_FONT_PT=18
+# Used when the monitors can't be read: what omarchy-transcode-ascii targets.
+FALLBACK_COLS=80
+FALLBACK_ROWS=26
+# Omarchy's idle service falls back to these when shell.json has no idle block.
+IDLE_FALLBACK_SCREENSAVER=150
+IDLE_FALLBACK_LOCK=300
+IDLE_MIN=60
+IDLE_MAX=7200
+
+export MENU_BEGIN="  // >>> omascii (managed; remove with: omascii menu uninstall)"
+export MENU_END="  // <<< omascii"
+
+plugin_id() { jq -r '.id' "$OMASCII_ROOT/manifest.json"; }
+
+die() {
+  jq -nc --arg error "$*" '{ok: false, error: $error}'
+  exit 1
+}
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"; }
+
+lock_state() {
+  mkdir -p "$STATE_DIR"
+  exec 9>"$STATE_DIR/lock"
+  flock -w 5 9 || die "another omascii command is still running"
+}
+
+# Replace a file in one rename, next to the real target so a symlinked
+# config stays a symlink and the swap never crosses filesystems.
+atomic_write() {
+  local target dir tmp
+  target=$(readlink -m -- "$1")
+  dir=${target%/*}
+  mkdir -p -- "$dir"
+  tmp=$(mktemp "$dir/.omascii.XXXXXX")
+  if ! cat >"$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if [[ -e $target ]]; then
+    chmod --reference="$target" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+  else
+    chmod 644 "$tmp"
+  fi
+  mv -f -- "$tmp" "$target"
+}
+
+sha_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# ---------------------------------------------------------------- rendering
+
+style_field() { jq -r --arg id "$1" --arg key "$2" '.[] | select(.id == $id) | .[$key] // empty' "$STYLES_JSON"; }
+
+style_ids() { jq -r '.[].id' "$STYLES_JSON"; }
+
+# Transliterate to printable ASCII (the bundled fonts only cover ASCII),
+# collapse whitespace, and cap the length.
+clean_text() {
+  local text
+  text=$(printf '%s' "$1" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$1" | tr -cd '[:print:][:space:]')
+  text=$(printf '%s' "$text" | tr -c '[:print:]' ' ' | tr -s ' ')
+  text=${text#"${text%%[! ]*}"}
+  text=${text%"${text##*[! ]}"}
+  printf '%s' "${text:0:MAX_TEXT}"
+}
+
+figlet_raw() {
+  local font=$1 unicode=$2 text=$3
+  local args=(-w 10000 -f "$FONTS_DIR/$font")
+  [[ $unicode == true ]] && args+=(-k)
+  # Some fonts draw blanks with U+2000..U+200A or U+00A0; make them plain
+  # spaces so trimming and centring see them.
+  figlet "${args[@]}" -- "$text" | LC_ALL=C sed 's/\xe2\x80[\x80-\x8a]/ /g; s/\xc2\xa0/ /g'
+}
+
+# Drop trailing spaces, blank edge rows, and the indent every row shares.
+tidy_block() {
+  awk '
+    { sub(/[ \t]+$/, ""); lines[NR] = $0 }
+    END {
+      first = 0; last = 0
+      for (i = 1; i <= NR; i++) if (lines[i] != "") { if (!first) first = i; last = i }
+      if (!first) exit
+      indent = -1
+      for (i = first; i <= last; i++) {
+        if (lines[i] == "") continue
+        match(lines[i], /^ */)
+        if (indent < 0 || RLENGTH < indent) indent = RLENGTH
+      }
+      for (i = first; i <= last; i++) print substr(lines[i], indent + 1)
+    }'
+}
+
+block_width() { awk '{ if (length($0) > w) w = length($0) } END { print w + 0 }'; }
+
+# Blocks arrive separated by a lone \x1e line; centre each one against the
+# widest and join them with `gap` blank rows.
+center_join() {
+  awk -v gap="${1:-1}" '
+    BEGIN { blocks = 0 }
+    $0 == "\036" { blocks++; next }
+    {
+      n = ++count[blocks]; row[blocks, n] = $0
+      if (length($0) > width[blocks]) width[blocks] = length($0)
+      if (length($0) > widest) widest = length($0)
+    }
+    END {
+      for (b = 0; b < blocks; b++) {
+        if (b > 0) for (g = 0; g < gap; g++) print ""
+        pad = int((widest - width[b]) / 2)
+        for (i = 1; i <= count[b]; i++) {
+          line = sprintf("%*s%s", pad, "", row[b, i])
+          sub(/[ \t]+$/, "", line)
+          print line
+        }
+      }
+    }'
+}
+
+render_block() { figlet_raw "$1" "$2" "$3" | tidy_block; }
+
+rendered_cols() { render_block "$1" "$2" "$3" | block_width; }
+
+fits_cols() { (($(rendered_cols "$1" "$2" "$3") <= $4)); }
+
+# Greedy wrap measured on the rendered width; prints one text line per art
+# line. A word too wide on its own is split at the longest prefix that fits.
+wrap_text() {
+  local font=$1 unicode=$2 text=$3 max_cols=$4
+  local -a words
+  local line="" word width cut
+  read -ra words <<<"$text"
+  for word in "${words[@]}"; do
+    if [[ -n $line ]] && fits_cols "$font" "$unicode" "$line $word" "$max_cols"; then
+      line="$line $word"
+      continue
+    fi
+    [[ -n $line ]] && printf '%s\n' "$line"
+    while ((${#word} > 1)) && ! fits_cols "$font" "$unicode" "$word" "$max_cols"; do
+      # Start from the proportional guess, then walk to the exact cut.
+      width=$(rendered_cols "$font" "$unicode" "$word")
+      cut=$((max_cols * ${#word} / width))
+      ((cut < 1)) && cut=1
+      ((cut > ${#word} - 1)) && cut=$((${#word} - 1))
+      while ((cut > 1)) && ! fits_cols "$font" "$unicode" "${word:0:cut}" "$max_cols"; do cut=$((cut - 1)); done
+      while ((cut + 1 < ${#word})) && fits_cols "$font" "$unicode" "${word:0:cut+1}" "$max_cols"; do cut=$((cut + 1)); done
+      printf '%s\n' "${word:0:cut}"
+      word=${word:cut}
+    done
+    line=$word
+  done
+  [[ -n $line ]] && printf '%s\n' "$line"
+}
+
+# Render wrapped text as one centred block per line. Lines are separated by
+# a blank row unless that alone would push the art past the row budget.
+render_art() {
+  local font=$1 unicode=$2 text=$3 max_cols=$4 max_rows=$5
+  local blocks="" line art
+  while IFS= read -r line; do
+    blocks+="$(render_block "$font" "$unicode" "$line")"$'\n\036\n'
+  done < <(wrap_text "$font" "$unicode" "$text" "$max_cols")
+  art=$(printf '%s' "$blocks" | center_join 1)
+  if (($(printf '%s\n' "$art" | wc -l) > max_rows)); then
+    art=$(printf '%s' "$blocks" | center_join 0)
+  fi
+  printf '%s\n' "$art"
+}
+
+render_style_json() {
+  local id=$1 text=$2 max_cols=$3 max_rows=$4
+  local font unicode name lacks art cols rows
+  font=$(style_field "$id" file)
+  [[ -n $font ]] || die "unknown style: $id"
+  unicode=$(style_field "$id" unicode)
+  name=$(style_field "$id" name)
+  lacks=$(style_field "$id" lacks)
+  art=$(render_art "$font" "${unicode:-false}" "$text" "$max_cols" "$max_rows")
+  printf '%s' "$art" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || die "style $id produced invalid UTF-8"
+  cols=$(printf '%s\n' "$art" | block_width)
+  rows=$(printf '%s\n' "$art" | wc -l)
+  # "missing" lists the characters of the text this font has no glyph for;
+  # figlet drops them silently (see test/font-coverage).
+  jq -nc --arg id "$id" --arg name "$name" --arg art "$art" --arg text "$text" --arg lacks "$lacks" \
+    --argjson cols "$cols" --argjson rows "$rows" \
+    --argjson maxCols "$max_cols" --argjson maxRows "$max_rows" \
+    '{id: $id, name: $name, art: $art, cols: $cols, rows: $rows,
+      fits: ($cols <= $maxCols and $rows <= $maxRows),
+      missing: ([$text | explode[] | [.] | implode] | unique
+        | map(select(. as $c | $lacks | contains($c))) | join(""))}'
+}
+
+# ------------------------------------------------------------------- budget
+
+# Omarchy runs the screensaver at 18pt on every monitor, so the art has to
+# fit the smallest one. Cells are rounded up so the estimate errs small; foot
+# on a 2880x1800 panel at scale 2 measures 99x28, which this reproduces.
+# Prints "cols rows source".
+screen_budget() {
+  local monitors
+  if monitors=$(hyprctl monitors -j 2>/dev/null) \
+    && jq -e 'type == "array" and length > 0' <<<"$monitors" >/dev/null 2>&1; then
+    jq -r --argjson pt "$SCREENSAVER_FONT_PT" '
+      [ .[]
+        | (if (.transform % 2) == 1 then {w: .height, h: .width} else {w: .width, h: .height} end) as $px
+        | ($pt * 4 / 3 * (.scale // 1)) as $size
+        | { cols: ($px.w / (($size * 0.6) | ceil) | floor),
+            rows: ($px.h / (($size * 1.32) | ceil) | floor) } ]
+      | "\(map(.cols) | min) \(map(.rows) | min) screen"' <<<"$monitors"
+  else
+    echo "$FALLBACK_COLS $FALLBACK_ROWS default"
+  fi
+}
+
+budget_json() {
+  jq -nc --argjson cols "$1" --argjson rows "$2" --arg source "$3" '{cols: $cols, rows: $rows, source: $source}'
+}
+
+# ------------------------------------------------------------------ history
+
+ensure_original() {
+  [[ -f $ORIGINAL_ART ]] && return 0
+  mkdir -p "$STATE_DIR"
+  if [[ -f $ART_FILE ]]; then
+    cp -- "$ART_FILE" "$ORIGINAL_ART"
+  elif [[ -f $DEFAULT_ART ]]; then
+    cp -- "$DEFAULT_ART" "$ORIGINAL_ART"
+  fi
+}
+
+history_entries() {
+  if [[ -s $HISTORY_INDEX ]] && jq -e 'type == "array"' "$HISTORY_INDEX" >/dev/null 2>&1; then
+    cat "$HISTORY_INDEX"
+  else
+    echo '[]'
+  fi
+}
+
+# Record a file's art at the top of the history (deduplicated by content).
+remember() {
+  local source=$1 label=$2 text=${3:-} style=${4:-}
+  local sha cols rows
+  [[ -f $source ]] || return 0
+  sha=$(sha_of "$source")
+  mkdir -p "$HISTORY_DIR"
+  [[ -f $HISTORY_DIR/$sha.txt ]] || cp -- "$source" "$HISTORY_DIR/$sha.txt"
+  cols=$(block_width <"$source")
+  rows=$(wc -l <"$source")
+  history_entries | jq -c --arg sha "$sha" --arg label "$label" --arg text "$text" --arg style "$style" \
+    --argjson cols "$cols" --argjson rows "$rows" --argjson at "$(date +%s)" --argjson limit "$HISTORY_LIMIT" \
+    '[{sha: $sha, label: $label, text: $text, style: $style, cols: $cols, rows: $rows, at: $at}]
+      + map(select(.sha != $sha)) | .[:$limit]' | atomic_write "$HISTORY_INDEX"
+  prune_history
+}
+
+prune_history() {
+  local keep file
+  keep=$(jq -r '.[].sha' "$HISTORY_INDEX")
+  for file in "$HISTORY_DIR"/*.txt; do
+    [[ -e $file ]] || continue
+    grep -qxF -- "$(basename "$file" .txt)" <<<"$keep" || rm -f -- "$file"
+  done
+}
+
+# Snapshot art that omascii did not write (image transcode, hand edit) so
+# replacing it is always reversible.
+remember_current() {
+  [[ -f $ART_FILE ]] || return 0
+  local sha
+  sha=$(sha_of "$ART_FILE")
+  history_entries | jq -e --arg sha "$sha" 'any(.[]; .sha == $sha)' >/dev/null && return 0
+  if [[ -f $DEFAULT_ART && $sha == "$(sha_of "$DEFAULT_ART")" ]]; then
+    remember "$ART_FILE" "Omarchy logo"
+  else
+    remember "$ART_FILE" "Previous art"
+  fi
+}
+
+install_art() {
+  local source=$1 label=$2 text=${3:-} style=${4:-}
+  ensure_original
+  remember_current
+  atomic_write "$ART_FILE" <"$source"
+  remember "$ART_FILE" "$label" "$text" "$style"
+}
+
+history_json() {
+  local limit=${1:-$HISTORY_LIMIT} current=""
+  [[ -f $ART_FILE ]] && current=$(sha_of "$ART_FILE")
+  history_entries | jq -c --argjson limit "$limit" '.[:$limit][]' | while IFS= read -r entry; do
+    local sha
+    sha=$(jq -r '.sha' <<<"$entry")
+    [[ -f $HISTORY_DIR/$sha.txt ]] || continue
+    jq -c --rawfile art "$HISTORY_DIR/$sha.txt" --arg current "$current" \
+      '. + {art: ($art | sub("\n+$"; "")), current: (.sha == $current)}' <<<"$entry"
+  done | jq -sc '.'
+}
+
+# --------------------------------------------------------------------- idle
+
+read_shell_json() {
+  if [[ -s $SHELL_JSON ]]; then
+    jq -e 'type == "object"' "$SHELL_JSON" >/dev/null 2>&1 || return 1
+    cat "$SHELL_JSON"
+  elif [[ -s $DEFAULT_SHELL_JSON ]]; then
+    cat "$DEFAULT_SHELL_JSON"
+  else
+    echo '{}'
+  fi
+}
+
+# Delays as the idle service sees them, from a shell.json document on stdin.
+idle_from_config() {
+  local source=user
+  [[ -s $SHELL_JSON ]] || source=defaults
+  jq -c --arg source "$source" --argjson ss "$IDLE_FALLBACK_SCREENSAVER" --argjson lk "$IDLE_FALLBACK_LOCK" '
+    def seconds($v; $fallback): if ($v | type) == "number" and $v >= 0 then ($v | floor) else $fallback end;
+    {screensaver: seconds(.idle.screensaver; $ss), lock: seconds(.idle.lock; $lk), source: $source}'
+}
+
+idle_json() {
+  local config
+  config=$(read_shell_json) || die "$SHELL_JSON is not valid JSON"
+  idle_from_config <<<"$config"
+}
+
+clamp() {
+  local value=$1
+  ((value < IDLE_MIN)) && value=$IDLE_MIN
+  ((value > IDLE_MAX)) && value=$IDLE_MAX
+  echo "$value"
+}
+
+idle_set() {
+  local screensaver="" lock=""
+  while (($#)); do
+    case $1 in
+      --screensaver) screensaver=${2:-}; shift 2 ;;
+      --lock) lock=${2:-}; shift 2 ;;
+      *) die "unknown idle option: $1" ;;
+    esac
+  done
+  [[ -z $screensaver || $screensaver =~ ^[0-9]+$ ]] || die "screensaver delay must be whole seconds"
+  [[ -z $lock || $lock =~ ^[0-9]+$ ]] || die "lock delay must be whole seconds"
+  [[ -n $screensaver || -n $lock ]] || die "nothing to set"
+
+  lock_state
+  local current config before lock_only=false
+  [[ -z $screensaver ]] && lock_only=true
+  config=$(read_shell_json) || die "$SHELL_JSON is not valid JSON; fix it before changing delays"
+  current=$(idle_from_config <<<"$config")
+  [[ -n $screensaver ]] || screensaver=$(jq -r '.screensaver' <<<"$current")
+  [[ -n $lock ]] || lock=$(jq -r '.lock' <<<"$current")
+  screensaver=$(clamp "$screensaver")
+  lock=$(clamp "$lock")
+  # The lock fires at min(screensaver, lock), so a lock that beats the
+  # screensaver would hide it. Move the value the caller did not set.
+  if ((lock < screensaver)); then
+    if $lock_only; then screensaver=$lock; else lock=$screensaver; fi
+  fi
+
+  before=$(stat -c '%Y %s' -- "$SHELL_JSON" 2>/dev/null || echo missing)
+  local updated
+  updated=$(jq --argjson s "$screensaver" --argjson l "$lock" \
+    '.idle = ((.idle // {}) + {screensaver: $s, lock: $l})' <<<"$config")
+  [[ $(stat -c '%Y %s' -- "$SHELL_JSON" 2>/dev/null || echo missing) == "$before" ]] \
+    || die "shell.json changed while saving; try again"
+  printf '%s\n' "$updated" | atomic_write "$SHELL_JSON"
+  omarchy-shell shell reloadConfig >/dev/null 2>&1 || true
+  idle_json | jq -c '{ok: true} + .'
+}
+
+# --------------------------------------------------------------------- menu
+
+menu_entry() {
+  local id
+  id=$(plugin_id)
+  printf '  "style.screensaver.omascii": {"icon":"󰊄","label":"Generate from Text","when":"grep -qs %s ~/.config/omarchy/shell.json","action":"omarchy-shell shell summon %s"},\n' \
+    "'\\\"$id\\\"'" "$id"
+}
+
+menu_installed() { [[ -f $MENU_FILE ]] && grep -qxF -- "$MENU_BEGIN" "$MENU_FILE"; }
+
+# Same rules as the Omarchy menu loader (MenuModel.js stripJsonc): whole-line
+# // comments and trailing commas are dropped, the rest must be JSON.
+menu_parses() {
+  sed -E '/^[[:space:]]*\/\//d' | perl -0pe 's/,(\s*[}\]])/$1/g' | jq -e 'type == "object"' >/dev/null 2>&1
+}
+
+menu_without_block() {
+  awk '
+    $0 == ENVIRON["MENU_BEGIN"] { skip = 1; next }
+    skip && $0 == ENVIRON["MENU_END"] { skip = 0; next }
+    !skip { print }' "$MENU_FILE"
+}
+
+menu_install() {
+  local updated
+  if [[ -f $MENU_FILE ]]; then
+    menu_parses <"$MENU_FILE" || die "$MENU_FILE does not parse; leaving it alone"
+    grep -qE '^[[:space:]]*\{[[:space:]]*$' "$MENU_FILE" || die "$MENU_FILE has no standalone opening brace"
+    # ENVIRON, not -v: awk -v would unescape the \" inside the entry.
+    updated=$(menu_without_block | ENTRY="$(menu_entry)" awk '
+      !done && /^[[:space:]]*\{[[:space:]]*$/ {
+        print; print ENVIRON["MENU_BEGIN"]; print ENVIRON["ENTRY"]; print ENVIRON["MENU_END"]; done = 1; next
+      }
+      { print }')
+  else
+    updated=$(printf '{\n%s\n%s\n%s\n}' "$MENU_BEGIN" "$(menu_entry)" "$MENU_END")
+  fi
+  menu_parses <<<"$updated" || die "menu entry would break $MENU_FILE; leaving it alone"
+  printf '%s\n' "$updated" | atomic_write "$MENU_FILE"
+}
+
+menu_uninstall() {
+  menu_installed || return 0
+  local updated
+  updated=$(menu_without_block)
+  printf '%s\n' "$updated" | atomic_write "$MENU_FILE"
+}
+
+menu_json() {
+  local choice=""
+  [[ -f $MENU_CHOICE ]] && choice=$(<"$MENU_CHOICE")
+  jq -nc --argjson installed "$(menu_installed && echo true || echo false)" --arg choice "$choice" \
+    '{installed: $installed, choice: $choice}'
+}
+
+cmd_menu() {
+  local action=${1:-status} forget=false
+  [[ ${2:-} == --forget ]] && forget=true
+  case $action in
+    status) ;;
+    install)
+      lock_state
+      menu_install
+      echo installed >"$MENU_CHOICE"
+      ;;
+    uninstall)
+      lock_state
+      menu_uninstall
+      if $forget; then rm -f -- "$MENU_CHOICE"; else echo removed >"$MENU_CHOICE"; fi
+      ;;
+    ensure)
+      # Add the row on first run only; a removal is remembered.
+      lock_state
+      if [[ ! -f $MENU_CHOICE ]]; then
+        menu_install
+        echo installed >"$MENU_CHOICE"
+      fi
+      ;;
+    *) die "usage: omascii menu install|uninstall|status|ensure [--forget]" ;;
+  esac
+  menu_json | jq -c '{ok: true} + .'
+}
+
+# ----------------------------------------------------------------- effects
+
+# The installed ttfx's effects, one "name<TAB>description" per line.
+effect_catalog() {
+  ttfx --help 2>/dev/null | awk '
+    /^Commands:/ { on = 1; next }
+    on && /^[^ ]/ { exit }
+    on && NF {
+      name = $1
+      if (name == "help") next
+      $1 = ""
+      sub(/^ +/, "")
+      print name "\t" $0
+    }'
+}
+
+effect_names() { effect_catalog | cut -f1; }
+
+disabled_effects() {
+  [[ -s $EFFECTS_FILE ]] && jq -r '.disabled[]? | strings' "$EFFECTS_FILE" 2>/dev/null || true
+}
+
+# Installed effects that are switched on, in catalogue order.
+enabled_effects() {
+  local disabled
+  disabled=$(disabled_effects)
+  effect_names | while IFS= read -r name; do
+    grep -qxF -- "$name" <<<"$disabled" || printf '%s\n' "$name"
+  done
+}
+
+effects_custom() {
+  local total enabled
+  total=$(effect_names | wc -l)
+  enabled=$(enabled_effects | wc -l)
+  ((total > 0 && enabled < total))
+}
+
+write_disabled() {
+  jq -nc '{disabled: [inputs | select(. != "")]}' -R | atomic_write "$EFFECTS_FILE"
+}
+
+screensaver_off() {
+  if [[ -f $OWNS_FLAG ]]; then [[ -f $INTENT_OFF ]]; else [[ -f $OMARCHY_SCREENSAVER_FLAG ]]; fi
+}
+
+# Give Omarchy's screensaver-off flag back, set to the user's own choice.
+release_flag() {
+  [[ -f $OWNS_FLAG ]] || return 0
+  if [[ -f $INTENT_OFF ]]; then
+    omarchy-toggle screensaver-off on
+  else
+    omarchy-toggle screensaver-off off
+  fi
+  rm -f -- "$OWNS_FLAG" "$INTENT_OFF"
+}
+
+# Hold the flag while effects are customised; release it otherwise. Writes
+# nothing when already consistent, so the toggles watcher cannot loop.
+sync_effects_mode() {
+  mkdir -p "$STATE_DIR"
+  if ! effects_custom; then
+    release_flag
+    return 0
+  fi
+  if [[ ! -f $OWNS_FLAG ]]; then
+    # Taking over: carry the user's current on/off choice across.
+    if [[ -f $OMARCHY_SCREENSAVER_FLAG ]]; then touch "$INTENT_OFF"; else rm -f -- "$INTENT_OFF"; fi
+    touch "$OWNS_FLAG"
+  elif [[ ! -f $OMARCHY_SCREENSAVER_FLAG ]]; then
+    # Someone cleared the flag (the Omarchy menu's screensaver toggle): the
+    # user wants the screensaver on.
+    rm -f -- "$INTENT_OFF"
+  fi
+  [[ -f $OMARCHY_SCREENSAVER_FLAG ]] || omarchy-toggle screensaver-off on
+}
+
+effects_summary_json() {
+  local total enabled only=""
+  total=$(effect_names | wc -l)
+  enabled=$(enabled_effects | wc -l)
+  ((enabled == 1)) && only=$(enabled_effects)
+  jq -nc --argjson total "$total" --argjson enabled "$enabled" --arg only "$only" \
+    --arg mode "$(effects_custom && echo custom || echo stock)" \
+    '{mode: $mode, enabled: $enabled, total: $total, only: $only}'
+}
+
+effects_json() {
+  local disabled
+  disabled=$(disabled_effects)
+  effect_catalog | while IFS=$'\t' read -r name description; do
+    jq -nc --arg id "$name" --arg description "$description" \
+      --argjson enabled "$(grep -qxF -- "$name" <<<"$disabled" && echo false || echo true)" \
+      '{id: $id, description: $description, enabled: $enabled}'
+  done | jq -sc --argjson summary "$(effects_summary_json)" '{ok: true, effects: .} + $summary'
+}
+
+valid_effect() { effect_names | grep -qxF -- "$1"; }
+
+# ttfx arguments that pick the effect; one argument per line.
+effect_args() {
+  local forced=${1:-} enabled count total
+  if [[ -n $forced ]]; then
+    printf '%s\n' "$forced"
+    return
+  fi
+  enabled=$(enabled_effects)
+  count=$(grep -c . <<<"$enabled" || true)
+  total=$(effect_names | wc -l)
+  if ((count == 0 || count == total)); then
+    printf '%s\n' --random-effect
+  elif ((count == 1)); then
+    printf '%s\n' "$enabled"
+  else
+    printf '%s\n' --include-effects $enabled --random-effect
+  fi
+}
+
+cmd_effects() {
+  local action=${1:-list}
+  (($#)) && shift
+  need ttfx
+  case $action in
+    list) ;;
+    set)
+      local id=${1:-} value=${2:-}
+      valid_effect "$id" || die "unknown effect: $id"
+      [[ $value == on || $value == off ]] || die "usage: omascii effects set EFFECT on|off"
+      lock_state
+      local disabled
+      disabled=$(disabled_effects | grep -vxF -- "$id" || true)
+      if [[ $value == off ]]; then
+        if [[ $(enabled_effects | grep -vxF -- "$id" | grep -c . || true) -eq 0 ]]; then
+          die "keep at least one effect on"
+        fi
+        disabled=$(printf '%s\n%s' "$disabled" "$id")
+      fi
+      printf '%s\n' "$disabled" | write_disabled
+      sync_effects_mode
+      ;;
+    all)
+      lock_state
+      printf '' | write_disabled
+      sync_effects_mode
+      ;;
+    only)
+      local id=${1:-}
+      valid_effect "$id" || die "unknown effect: $id"
+      lock_state
+      effect_names | grep -vxF -- "$id" | write_disabled
+      sync_effects_mode
+      ;;
+    sync)
+      lock_state
+      sync_effects_mode
+      ;;
+    release)
+      lock_state
+      release_flag
+      ;;
+    args)
+      [[ -z ${1:-} ]] || valid_effect "$1" || die "unknown effect: $1"
+      effect_args "${1:-}" | jq -Rsc 'split("\n") | map(select(. != "")) | {ok: true, args: .}'
+      return
+      ;;
+    *) die "usage: omascii effects [list|set EFFECT on|off|all|only EFFECT|sync|release|args [EFFECT]]" ;;
+  esac
+  effects_json
+}
+
+# ------------------------------------------------------- screensaver runner
+#
+# Mirrors omarchy-launch-screensaver and omarchy-screensaver (same terminal
+# configs, same window class, same exit rules), but lets ttfx use the chosen
+# effects instead of always --random-effect.
+
+cmd_launch_screensaver() {
+  local force=false effect="" once=false
+  while (($#)); do
+    case $1 in
+      force) force=true; shift ;;
+      --effect) effect=${2-}; shift 2 ;;
+      --once) once=true; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  need ttfx
+  [[ -z $effect ]] || valid_effect "$effect" || die "unknown effect: $effect"
+  if ! $force; then
+    screensaver_off && { jq -nc '{ok: true, skipped: "screensaver is off"}'; return; }
+    [[ $(omarchy-shell lock isLocked 2>/dev/null) == true ]] && { jq -nc '{ok: true, skipped: "locked"}'; return; }
+  fi
+  if pgrep -f '[o]rg.omarchy.screensaver' >/dev/null; then
+    jq -nc '{ok: true, skipped: "already running"}'
+    return
+  fi
+
+  local terminal focused monitor events
+  terminal=$(xdg-terminal-exec --print-id 2>/dev/null || true)
+  case $terminal in
+    *Alacritty* | *ghostty* | *foot* | *kitty*) ;;
+    *) die "the screensaver only runs in Alacritty, Foot, Ghostty, or Kitty" ;;
+  esac
+
+  local runner=(bash "$OMASCII_ROOT/bin/omascii" run-screensaver)
+  [[ -n $effect ]] && runner+=(--effect "$effect")
+  $once && runner+=(--once)
+
+  focused=$(omarchy-hyprland-monitor-focused 2>/dev/null || true)
+  local socket="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+  exec {events}< <(socat -U - "UNIX-CONNECT:$socket" 2>/dev/null)
+
+  for monitor in $(hyprctl monitors -j | jq -r '.[].name'); do
+    hyprctl dispatch "hl.dsp.focus({ monitor = \"$monitor\" })" >/dev/null 2>&1 \
+      || hyprctl dispatch focusmonitor "$monitor" >/dev/null 2>&1 || true
+    case $terminal in
+      *Alacritty*) hypr_exec alacritty --class=org.omarchy.screensaver \
+        --config-file "$OMARCHY_PATH/default/alacritty/screensaver.toml" -e "${runner[@]}" ;;
+      *ghostty*) hypr_exec ghostty --class=org.omarchy.screensaver \
+        --config-file="$OMARCHY_PATH/default/ghostty/screensaver" --font-size=18 -e "${runner[@]}" ;;
+      *foot*) hypr_exec foot --app-id=org.omarchy.screensaver \
+        --config="$OMARCHY_PATH/default/foot/screensaver.ini" -e "${runner[@]}" ;;
+      *kitty*) hypr_exec kitty --class=org.omarchy.screensaver \
+        --override font_size=18 --override window_padding_width=0 -e "${runner[@]}" ;;
+    esac
+    # A new window maps on whichever monitor is focused, so wait for this
+    # one before moving on.
+    local line deadline=$((SECONDS + 5))
+    while ((SECONDS < deadline)) && IFS= read -r -t $((deadline - SECONDS)) -u "$events" line; do
+      [[ $line == openwindow\>\>*,org.omarchy.screensaver,* ]] && break
+    done
+  done
+
+  if [[ -n $focused ]]; then
+    hyprctl dispatch "hl.dsp.focus({ monitor = \"$focused\" })" >/dev/null 2>&1 \
+      || hyprctl dispatch focusmonitor "$focused" >/dev/null 2>&1 || true
+  fi
+  jq -nc '{ok: true}'
+}
+
+hypr_exec() {
+  local command
+  printf -v command '%q ' "$@"
+  hyprctl dispatch "hl.dsp.exec_cmd([[$command]])" >/dev/null 2>&1 \
+    || hyprctl dispatch exec -- bash -lc "$command" >/dev/null
+}
+
+# Runs inside the screensaver terminal.
+cmd_run_screensaver() {
+  local effect="" once=false
+  while (($#)); do
+    case $1 in
+      --effect) effect=${2-}; shift 2 ;;
+      --once) once=true; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local tty
+  tty=$(tty 2>/dev/null)
+
+  in_focus() {
+    hyprctl activewindow -j | jq -e '.class == "org.omarchy.screensaver"' >/dev/null 2>&1
+  }
+  quit() {
+    hyprctl eval 'hl.config({ cursor = { invisible = false } })' &>/dev/null \
+      || hyprctl keyword cursor:invisible false &>/dev/null || true
+    pkill -x ttfx 2>/dev/null
+    pkill -f '[o]rg.omarchy.screensaver' 2>/dev/null
+    exit 0
+  }
+  trap quit SIGINT SIGTERM SIGHUP SIGQUIT
+
+  printf '\033]11;rgb:00/00/00\007'
+  hyprctl eval 'hl.config({ cursor = { invisible = true } })' &>/dev/null \
+    || hyprctl keyword cursor:invisible true &>/dev/null || true
+
+  # ttfx sizes its canvas once; wait for the window to leave 80x24.
+  local deadline=$((SECONDS + 2))
+  while ((SECONDS < deadline)) && [[ $(stty size 2>/dev/null) == "24 80" ]]; do sleep 0.02; done
+
+  while true; do
+    # Re-read the choice every cycle so changes apply without a restart.
+    local args
+    mapfile -t args < <(effect_args "$effect")
+    if [[ ${args[0]:-} == --* ]]; then
+      ttfx "${args[@]}" -i "$ART_FILE" --frame-rate 120 --canvas-width 0 --canvas-height 0 \
+        --reuse-canvas --anchor-canvas c --anchor-text c --no-eol --no-restore-cursor &
+    else
+      ttfx -i "$ART_FILE" --frame-rate 120 --canvas-width 0 --canvas-height 0 \
+        --reuse-canvas --anchor-canvas c --anchor-text c --no-eol --no-restore-cursor "${args[@]}" &
+    fi
+    while pgrep -t "${tty#/dev/}" -x ttfx >/dev/null; do
+      if read -rn1 -t 1 || ! in_focus; then quit; fi
+    done
+    if $once; then
+      read -rn1 -t 3 || true
+      quit
+    fi
+  done
+}
+
+# ----------------------------------------------------------------- commands
+
+usage() {
+  cat <<'EOF'
+Usage: omascii <command> [options]
+
+  render --text TEXT (--all | --style ID) [--max-cols N] [--max-rows N] [--raw]
+  apply --text TEXT --style ID [--force] [--max-cols N] [--max-rows N]
+  restore <SHA | original | default>
+  history
+  fonts
+  state
+  idle get | idle set [--screensaver SECONDS] [--lock SECONDS]
+  screensaver on|off
+  awake on|off
+  preview [--effect EFFECT]
+  effects [list | set EFFECT on|off | all | only EFFECT | sync | release]
+  launch-screensaver [force] [--effect EFFECT] [--once]
+  menu install|uninstall|status|ensure [--forget]
+  doctor
+EOF
+}
+
+parse_render_args() {
+  TEXT="" STYLE="" ALL=false FORCE=false RAW=false MAX_COLS="" MAX_ROWS=""
+  while (($#)); do
+    case $1 in
+      --text) TEXT=${2-}; shift 2 ;;
+      --style) STYLE=${2-}; shift 2 ;;
+      --all) ALL=true; shift ;;
+      --force) FORCE=true; shift ;;
+      --raw) RAW=true; shift ;;
+      --max-cols) MAX_COLS=${2-}; shift 2 ;;
+      --max-rows) MAX_ROWS=${2-}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  # Without explicit limits, fit the screens the screensaver will run on.
+  local cols rows source
+  read -r cols rows source < <(screen_budget)
+  BUDGET_SOURCE=setting
+  [[ -n $MAX_COLS && -n $MAX_ROWS ]] || BUDGET_SOURCE=$source
+  MAX_COLS=${MAX_COLS:-$cols}
+  MAX_ROWS=${MAX_ROWS:-$rows}
+  [[ $MAX_COLS =~ ^[0-9]+$ && $MAX_COLS -ge 20 ]] || die "--max-cols must be a number of at least 20"
+  [[ $MAX_ROWS =~ ^[0-9]+$ && $MAX_ROWS -ge 3 ]] || die "--max-rows must be a number of at least 3"
+  TEXT=$(clean_text "$TEXT")
+  [[ -n $TEXT ]] || die "type some text first"
+}
+
+cmd_render() {
+  need figlet
+  parse_render_args "$@"
+  if $ALL; then
+    # One background render per style, collected in catalogue order.
+    local id i=0 work
+    work=$(mktemp -d)
+    # shellcheck disable=SC2064 # expand now; $work is local
+    trap "rm -rf -- '$work'" EXIT
+    while IFS= read -r id; do
+      render_style_json "$id" "$TEXT" "$MAX_COLS" "$MAX_ROWS" >"$work/$i" &
+      i=$((i + 1))
+    done < <(style_ids)
+    wait
+    # Styles that fit and draw every character come first, then those that
+    # drop some characters, then those too big; each group in catalogue
+    # order. Styles that can draw none of the text are left out.
+    for ((n = 0; n < i; n++)); do cat "$work/$n"; done \
+      | jq -sc --arg text "$TEXT" --argjson budget "$(budget_json "$MAX_COLS" "$MAX_ROWS" "$BUDGET_SOURCE")" '
+        map(select(.ok != false)) as $styles
+        | {ok: true, text: $text, budget: $budget,
+           styles: ($styles | map(select(.art != ""))
+             | sort_by([(if .fits then 0 else 1 end), (if .missing == "" then 0 else 1 end)]))}'
+  else
+    [[ -n $STYLE ]] || die "pass --style ID or --all"
+    local result
+    result=$(render_style_json "$STYLE" "$TEXT" "$MAX_COLS" "$MAX_ROWS")
+    if $RAW; then
+      jq -r '.art' <<<"$result"
+    else
+      jq -c --arg text "$TEXT" --argjson budget "$(budget_json "$MAX_COLS" "$MAX_ROWS" "$BUDGET_SOURCE")" \
+        '{ok: true, text: $text, budget: $budget} + .' <<<"$result"
+    fi
+  fi
+}
+
+cmd_apply() {
+  need figlet
+  parse_render_args "$@"
+  [[ -n $STYLE ]] || die "pass --style ID"
+  local result
+  result=$(render_style_json "$STYLE" "$TEXT" "$MAX_COLS" "$MAX_ROWS")
+  [[ -n $(jq -r '.art' <<<"$result") ]] || die "$(jq -r '.name' <<<"$result") can't draw any of this text"
+  if ! $FORCE && [[ $(jq -r '.fits' <<<"$result") != true ]]; then
+    die "$(jq -r '"\(.name) renders \(.cols)x\(.rows), larger than the '"${MAX_COLS}x${MAX_ROWS}"' the screensaver shows"' <<<"$result")"
+  fi
+  lock_state
+  local tmp
+  tmp=$(mktemp)
+  jq -r '.art' <<<"$result" >"$tmp"
+  install_art "$tmp" "$TEXT · $(jq -r '.name' <<<"$result")" "$TEXT" "$STYLE"
+  rm -f -- "$tmp"
+  jq -c '{ok: true, applied: {id, name, cols, rows}}' <<<"$result"
+}
+
+cmd_restore() {
+  local target=${1:-} source label
+  case $target in
+    original)
+      [[ -f $ORIGINAL_ART ]] || die "no original art saved yet"
+      source=$ORIGINAL_ART label="Original art"
+      ;;
+    default)
+      [[ -f $DEFAULT_ART ]] || die "missing $DEFAULT_ART"
+      source=$DEFAULT_ART label="Omarchy logo"
+      ;;
+    *)
+      [[ $target =~ ^[0-9a-f]{64}$ ]] || die "usage: omascii restore <sha|original|default>"
+      source="$HISTORY_DIR/$target.txt"
+      [[ -f $source ]] || die "no history entry $target"
+      label=$(history_entries | jq -r --arg sha "$target" '(.[] | select(.sha == $sha) | .label) // "Restored art"')
+      ;;
+  esac
+  lock_state
+  local text style
+  text=$(history_entries | jq -r --arg sha "$(sha_of "$source")" '(.[] | select(.sha == $sha) | .text) // ""')
+  style=$(history_entries | jq -r --arg sha "$(sha_of "$source")" '(.[] | select(.sha == $sha) | .style) // ""')
+  install_art "$source" "$label" "$text" "$style"
+  jq -nc --arg label "$label" '{ok: true, restored: $label}'
+}
+
+cmd_state() {
+  mkdir -p "$OMARCHY_STATE/toggles" "$OMARCHY_STATE/indicators"
+  local figlet_version="" art_sha="" art_text="" cols=0 rows=0 is_default=false idle
+  local has_figlet=false
+  if command -v figlet >/dev/null 2>&1; then
+    has_figlet=true
+    figlet_version=$(figlet -v 2>/dev/null | sed -n 's/.*Version: \([^ ,]*\).*/\1/p' | head -1)
+  fi
+  if [[ -f $ART_FILE ]]; then
+    art_sha=$(sha_of "$ART_FILE")
+    art_text=$(head -c 65536 -- "$ART_FILE")
+    cols=$(block_width <"$ART_FILE")
+    rows=$(wc -l <"$ART_FILE")
+    [[ -f $DEFAULT_ART && $art_sha == "$(sha_of "$DEFAULT_ART")" ]] && is_default=true
+  fi
+  local config
+  if config=$(read_shell_json); then
+    idle=$(idle_from_config <<<"$config")
+  else
+    idle=$(jq -nc --argjson ss "$IDLE_FALLBACK_SCREENSAVER" --argjson lk "$IDLE_FALLBACK_LOCK" \
+      '{screensaver: $ss, lock: $lk, source: "invalid"}')
+  fi
+  jq -nc \
+    --argjson hasFiglet "$has_figlet" --arg figlet "$figlet_version" \
+    --argjson screensaverOff "$(screensaver_off && echo true || echo false)" \
+    --argjson effects "$(command -v ttfx >/dev/null 2>&1 && effects_summary_json || echo null)" \
+    --argjson stayAwake "$([[ -f $OMARCHY_STATE/indicators/stay-awake ]] && echo true || echo false)" \
+    --argjson idle "$idle" \
+    --arg artSha "$art_sha" --arg artText "$art_text" \
+    --argjson cols "$cols" --argjson rows "$rows" --argjson isDefault "$is_default" \
+    --argjson hasOriginal "$([[ -f $ORIGINAL_ART ]] && echo true || echo false)" \
+    --argjson history "$(history_json 6)" \
+    --argjson menu "$(menu_json)" \
+    --argjson budget "$(read -r c r src < <(screen_budget); budget_json "$c" "$r" "$src")" \
+    '{ok: true, budget: $budget,
+      engine: {figlet: $hasFiglet, version: $figlet},
+      screensaverOff: $screensaverOff, stayAwake: $stayAwake, idle: $idle, effects: $effects,
+      art: {sha: $artSha, text: $artText, cols: $cols, rows: $rows, isDefault: $isDefault, hasOriginal: $hasOriginal},
+      history: $history, menu: $menu}'
+}
+
+cmd_screensaver() {
+  local value=${1:-}
+  [[ $value == on || $value == off ]] || die "usage: omascii screensaver on|off"
+  if [[ -f $OWNS_FLAG ]]; then
+    # omascii runs the screensaver: Omarchy's flag stays held, the choice is ours.
+    if [[ $value == off ]]; then touch "$INTENT_OFF"; else rm -f -- "$INTENT_OFF"; fi
+  elif [[ $value == off ]]; then
+    omarchy-toggle screensaver-off on
+  else
+    omarchy-toggle screensaver-off off
+  fi
+  jq -nc --argjson off "$(screensaver_off && echo true || echo false)" '{ok: true, screensaverOff: $off}'
+}
+
+cmd_awake() {
+  case ${1:-} in
+    on) omarchy-toggle-idle stay-awake >/dev/null ;;
+    off) omarchy-toggle-idle allow-idle >/dev/null ;;
+    *) die "usage: omascii awake on|off" ;;
+  esac
+  jq -nc --argjson awake "$([[ -f $OMARCHY_STATE/indicators/stay-awake ]] && echo true || echo false)" \
+    '{ok: true, stayAwake: $awake}'
+}
+
+# Show the screensaver now: one effect (--effect, played once), the chosen
+# effects, or Omarchy's own when every effect is on.
+cmd_preview() {
+  local effect=""
+  [[ ${1:-} == --effect ]] && effect=${2:-}
+  if [[ -n $effect ]]; then
+    valid_effect "$effect" || die "unknown effect: $effect"
+    setsid -f bash "$OMASCII_ROOT/bin/omascii" launch-screensaver force --effect "$effect" --once >/dev/null 2>&1 </dev/null
+  elif effects_custom; then
+    setsid -f bash "$OMASCII_ROOT/bin/omascii" launch-screensaver force >/dev/null 2>&1 </dev/null
+  else
+    need omarchy-launch-screensaver
+    setsid -f omarchy-launch-screensaver force >/dev/null 2>&1 </dev/null
+  fi
+  jq -nc '{ok: true}'
+}
+
+cmd_doctor() {
+  local fonts='[]' id
+  if command -v figlet >/dev/null 2>&1; then
+    fonts=$(style_ids | while IFS= read -r id; do
+      local art ok=true
+      art=$(render_art "$(style_field "$id" file)" "$(style_field "$id" unicode)" "Ag" 80 26 2>/dev/null) || ok=false
+      [[ -n $art ]] || ok=false
+      printf '%s' "$art" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || ok=false
+      jq -nc --arg id "$id" --argjson ok "$ok" '{id: $id, ok: $ok}'
+    done | jq -sc '.')
+  fi
+  jq -nc \
+    --argjson figlet "$(command -v figlet >/dev/null 2>&1 && echo true || echo false)" \
+    --argjson ttfx "$(command -v ttfx >/dev/null 2>&1 && echo true || echo false)" \
+    --argjson fonts "$fonts" --arg art "$ART_FILE" --arg root "$OMASCII_ROOT" \
+    --argjson menu "$(menu_json)" \
+    '{ok: ($figlet and ($fonts | all(.ok))), figlet: $figlet, ttfx: $ttfx, fonts: $fonts,
+      artFile: $art, pluginRoot: $root, menu: $menu}'
+}
+
+main() {
+  need jq
+  local command=${1:-}
+  (($#)) && shift
+  case $command in
+    render) cmd_render "$@" ;;
+    apply) cmd_apply "$@" ;;
+    restore) cmd_restore "$@" ;;
+    history) history_json | jq -c '{ok: true, history: .}' ;;
+    fonts) jq -c '{ok: true, styles: map({id, name})}' "$STYLES_JSON" ;;
+    state) cmd_state ;;
+    idle)
+      case ${1:-get} in
+        get) idle_json | jq -c '{ok: true} + .' ;;
+        set) shift; idle_set "$@" ;;
+        *) die "usage: omascii idle get | idle set [--screensaver S] [--lock L]" ;;
+      esac
+      ;;
+    screensaver) cmd_screensaver "$@" ;;
+    awake) cmd_awake "$@" ;;
+    preview) cmd_preview "$@" ;;
+    effects) cmd_effects "$@" ;;
+    launch-screensaver) cmd_launch_screensaver "$@" ;;
+    run-screensaver) cmd_run_screensaver "$@" ;;
+    menu) cmd_menu "$@" ;;
+    doctor) cmd_doctor ;;
+    -h | --help | help | "") usage ;;
+    *) die "unknown command: $command (see omascii --help)" ;;
+  esac
+}
+
+main "$@"

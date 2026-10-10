@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+# Run every check: backend tests, Model.js tests, manifest validation, QML
+# lint, plugin-id consistency, and shellcheck when it is installed.
+
+set -uo pipefail
+
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+status=0
+
+step() {
+  echo "==> $1"
+  shift
+  if ! "$@"; then
+    echo "FAILED: $*"
+    status=1
+  fi
+}
+
+id_consistent() {
+  local id
+  id=$(jq -r '.id' "$ROOT/manifest.json")
+  local stray
+  stray=$(grep -rhoE 'io\.github\.[A-Za-z0-9_-]+\.omascii' "$ROOT" --include='*.qml' --include='*.sh' \
+    --include='*.md' --include='omascii' --exclude-dir=.git | sort -u | grep -vxF "$id" || true)
+  if [[ -n $stray ]]; then
+    echo "plugin id mismatch (manifest: $id): $stray"
+    return 1
+  fi
+  grep -q "moduleName: \"$id\"" "$ROOT/BarWidget.qml" "$ROOT/Panel.qml"
+}
+
+step "backend" "$ROOT/test/backend.test.sh"
+step "model" node --test "$ROOT/test/model.test.js"
+step "font coverage" "$ROOT/test/font-coverage"
+if command -v omarchy-plugin-validate >/dev/null 2>&1; then
+  step "manifest" omarchy-plugin-validate "$ROOT"
+fi
+step "qml lint" "$ROOT/test/lint-qml"
+step "plugin id" id_consistent
+if command -v shellcheck >/dev/null 2>&1; then
+  step "shellcheck" shellcheck -x "$ROOT/bin/omascii" "$ROOT/install.sh" "$ROOT/uninstall.sh" \
+    "$ROOT/test/backend.test.sh" "$ROOT/test/lint-qml" "$ROOT/test/font-coverage" "$ROOT/test/run"
+fi
+
+((status == 0)) && echo "all checks passed"
+exit "$status"

@@ -1,0 +1,5 @@
+{
+  // Extend the Quickshell Omarchy menu with JSONC.
+  // "personal": {"icon":"","label":"Personal"},
+  "personal.notes": {"icon":"󰎞","label":"Notes","action":"omarchy-launch-editor ~/notes"},
+}

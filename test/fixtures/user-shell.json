@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "idle": {
+    "screensaver": 300,
+    "lock": 600
+  },
+  "bar": {
+    "marker": "user-bar",
+    "layout": { "left": [{ "id": "omarchy.workspaces" }], "center": [], "right": [{ "id": "omarchy.tray" }] }
+  },
+  "plugins": {}
+}

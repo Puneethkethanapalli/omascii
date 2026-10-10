@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+# Check which printable ASCII characters each style can draw. Some fonts
+# leave glyphs empty, and figlet silently drops those characters. The
+# "lacks" field in fonts/styles.json records them, so the backend can warn.
+#
+#   test/font-coverage          verify styles.json matches the fonts
+#   test/font-coverage --write  rewrite the "lacks" fields
+
+set -euo pipefail
+export LC_ALL=C.UTF-8
+
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+STYLES="$ROOT/fonts/styles.json"
+
+lacks_for() {
+  local file=$1 unicode=$2 code char width lacks=""
+  local args=(-w 10000 -f "$ROOT/fonts/$file")
+  [[ $unicode == true ]] && args+=(-k)
+  for code in $(seq 33 126); do
+    printf -v char "\\x$(printf '%x' "$code")"
+    width=$(figlet "${args[@]}" -- "$char" | awk '{ sub(/[ \t]+$/, ""); if (length($0) > w) w = length($0) } END { print w + 0 }')
+    ((width == 0)) && lacks+=$char
+  done
+  printf '%s' "$lacks"
+}
+
+computed=$(jq -c '.[]' "$STYLES" | while IFS= read -r style; do
+  lacks=$(lacks_for "$(jq -r '.file' <<<"$style")" "$(jq -r '.unicode' <<<"$style")")
+  jq -c --arg lacks "$lacks" '. + {lacks: $lacks}' <<<"$style"
+done | jq -s '.')
+
+if [[ ${1:-} == --write ]]; then
+  # One style per line, matching the hand-written layout.
+  jq -c '.[]' <<<"$computed" | sed 's/^/  /; $!s/$/,/' | { echo '['; cat; echo ']'; } >"$STYLES"
+  echo "updated $STYLES"
+  exit 0
+fi
+
+if ! diff <(jq -c '.[] | {id, lacks: (.lacks // "")}' "$STYLES") <(jq -c '.[] | {id, lacks}' <<<"$computed"); then
+  echo "fonts/styles.json lacks fields are stale; run test/font-coverage --write" >&2
+  exit 1
+fi
+echo "font coverage matches styles.json"
