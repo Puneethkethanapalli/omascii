@@ -49,5 +49,5 @@ if ! jq -e --arg id "$ID" '[.bar.layout[]?[]? | (.id? // .)] | index($id)' \
   omarchy-plugin-enable "$ID" --section right
 fi
 
-"$DEST/bin/omascii" menu install >/dev/null
-echo "omascii is on the bar (right side) and under Style › Screensaver in the Omarchy menu."
+echo "omascii is on the bar (right side)."
+echo "To add it under Style › Screensaver in the Omarchy menu, turn on 'In Omarchy menu' in its panel."

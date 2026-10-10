@@ -20,7 +20,7 @@ and idle settings Omarchy offers, all from the same panel.
 - **Recent arts.** Your last 4 arts, each with **Restore** and **Remove**. Art you set another way (from an image, or by editing the file) is saved before omascii replaces it, so nothing is lost by accident.
 - **Screensaver and idle controls.** Screensaver on/off, Stay Awake, screensaver and lock delays, Lock now, Preview, Set from image, Edit text, and Restore the Omarchy logo.
 - **Bar icon.** Dims when the screensaver is off and turns your accent colour while staying awake. Right-click it to preview the screensaver.
-- **Menu entry.** Style › Screensaver › **Generate from Text** opens the panel. Turn it off with the panel's *In Omarchy menu* switch.
+- **Menu entry (optional).** Turn on the panel's *In Omarchy menu* switch to add Style › Screensaver › **Generate from Text**, which opens the panel. omascii never adds it by itself.
 
 ## Install
 
@@ -29,6 +29,7 @@ Requires:
 - **Omarchy 4**, which has the Quickshell shell.
 - **figlet**: the panel offers an **Install figlet** button if it's missing.
 - **A supported terminal:** Alacritty, Foot, Ghostty or Kitty, the same ones Omarchy's screensaver supports.
+- **jq, socat and ttfx**, which ship with Omarchy.
 
 ```bash
 omarchy plugin add https://github.com/Puneethkethanapalli/omascii.git --enable --yes
@@ -139,7 +140,8 @@ omascii only touches what Omarchy already lets you change:
 - The `idle` block of `~/.config/omarchy/shell.json`, which holds the screensaver and lock delays. Other settings and
   their order are left alone.
 - Omarchy's own toggles for the screensaver and Stay Awake.
-- A "Generate from Text" row in `~/.config/omarchy/extensions/omarchy-menu.jsonc`, between marker comments.
+- Only if you turn on *In Omarchy menu*: a "Generate from Text" row in
+  `~/.config/omarchy/extensions/omarchy-menu.jsonc`, between marker comments.
 
 Its own data lives in `~/.local/state/omascii`, which holds history and your original art, and in
 `~/.config/omascii/effects.json`, which holds your effect choice.
@@ -159,8 +161,8 @@ Its own data lives in `~/.local/state/omascii`, which holds history and your ori
 omarchy plugin remove io.github.puneethkethanapalli.omascii
 ```
 
-This hands the screensaver back to Omarchy. The Style › Screensaver row hides itself once omascii is gone; to delete it
-as well, switch off *In Omarchy menu* in the panel before removing the plugin.
+This hands the screensaver back to Omarchy. If you added the Style › Screensaver row, it hides itself once omascii is
+gone; to delete it as well, switch off *In Omarchy menu* in the panel before removing the plugin.
 
 From a checkout, `./uninstall.sh` does all of this and offers to restore the art you had before omascii. `--purge` also
 deletes the history in `~/.local/state/omascii` and your effect choice.

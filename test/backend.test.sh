@@ -306,14 +306,6 @@ run menu uninstall >/dev/null
 assert_eq "$(cat "$menu")" "$original" "uninstall not byte-identical"
 teardown
 
-setup "menu ensure respects a removal"
-run menu ensure >/dev/null
-assert_eq "$(run menu status | jq -r '.installed')" true
-run menu uninstall >/dev/null
-run menu ensure >/dev/null
-assert_eq "$(run menu status | jq -r '.installed')" false "ensure re-added a removed row"
-teardown
-
 setup "menu install creates a missing file"
 rm "$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 run menu install >/dev/null

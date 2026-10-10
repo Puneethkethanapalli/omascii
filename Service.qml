@@ -325,9 +325,7 @@ Item {
   Component.onDestruction: Quickshell.execDetached(["bash", "-c", root.releaseScript, "omascii-release", root.pluginId])
 
   Component.onCompleted: {
-    // Add the Style › Screensaver menu row on first run only; removing it
-    // from the panel is remembered by the backend.
-    act(["menu", "ensure"])
+    // The Omarchy menu row is opt-in: only the panel's switch adds it.
     act(["fonts"], function(ok, result) { if (ok && result) root.catalog = result.styles || [] })
     // Take the screensaver back over after a restart or re-enable.
     act(["effects", "sync"], root.takeEffects)

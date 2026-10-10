@@ -18,5 +18,6 @@ First release.
 - Recent arts: the last 4, each with restore and remove. Art set outside omascii is saved before it gets replaced.
 - Stock screensaver/idle controls: on/off, Stay Awake, screensaver and lock delays, Lock now, Preview, Set from image,
   Edit text, Restore the Omarchy logo.
-- "Generate from Text" row under Style › Screensaver in the Omarchy menu.
+- Optional "Generate from Text" row under Style › Screensaver in the Omarchy menu, added only when you turn it on in
+  the panel.
 - `bin/omascii` backend usable from the command line.

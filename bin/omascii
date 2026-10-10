@@ -479,15 +479,7 @@ cmd_menu() {
       menu_uninstall
       if $forget; then rm -f -- "$MENU_CHOICE"; else echo removed >"$MENU_CHOICE"; fi
       ;;
-    ensure)
-      # Add the row on first run only; a removal is remembered.
-      lock_state
-      if [[ ! -f $MENU_CHOICE ]]; then
-        menu_install
-        echo installed >"$MENU_CHOICE"
-      fi
-      ;;
-    *) die "usage: omascii menu install|uninstall|status|ensure [--forget]" ;;
+    *) die "usage: omascii menu install|uninstall|status [--forget]" ;;
   esac
   menu_json | jq -c '{ok: true} + .'
 }
@@ -812,7 +804,7 @@ Usage: omascii <command> [options]
   preview [--effect EFFECT]
   effects [list | set EFFECT on|off | all | only EFFECT | sync | release]
   launch-screensaver [force] [--effect EFFECT] [--once]
-  menu install|uninstall|status|ensure [--forget]
+  menu install|uninstall|status [--forget]
   doctor
 EOF
 }
