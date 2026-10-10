@@ -34,7 +34,7 @@ OWNS_FLAG="$STATE_DIR/owns-screensaver-flag"
 INTENT_OFF="$STATE_DIR/screensaver-off"
 
 MAX_TEXT=48
-HISTORY_LIMIT=20
+HISTORY_LIMIT=4
 SCREENSAVER_FONT_PT=18
 # Used when the monitors can't be read: what omarchy-transcode-ascii targets.
 FALLBACK_COLS=80
@@ -803,7 +803,7 @@ Usage: omascii <command> [options]
   render --text TEXT (--all | --style ID) [--max-cols N] [--max-rows N] [--raw]
   apply --text TEXT --style ID [--force] [--max-cols N] [--max-rows N]
   restore <SHA | original | default>
-  history
+  history [list | remove SHA]
   fonts
   state
   idle get | idle set [--screensaver SECONDS] [--lock SECONDS]
@@ -925,6 +925,26 @@ cmd_restore() {
   jq -nc --arg label "$label" '{ok: true, restored: $label}'
 }
 
+cmd_history() {
+  case ${1:-list} in
+    list) ;;
+    remove)
+      local sha=${2:-}
+      [[ $sha =~ ^[0-9a-f]{64}$ ]] || die "usage: omascii history remove SHA"
+      lock_state
+      history_entries | jq -e --arg sha "$sha" 'any(.[]; .sha == $sha)' >/dev/null || die "no history entry $sha"
+      if [[ -f $ART_FILE && $(sha_of "$ART_FILE") == "$sha" ]]; then
+        die "that art is on the screensaver now; restore another one first"
+      fi
+      history_entries | jq -c --arg sha "$sha" --argjson limit "$HISTORY_LIMIT" \
+        'map(select(.sha != $sha)) | .[:$limit]' | atomic_write "$HISTORY_INDEX"
+      prune_history
+      ;;
+    *) die "usage: omascii history [list | remove SHA]" ;;
+  esac
+  history_json | jq -c '{ok: true, history: .}'
+}
+
 cmd_state() {
   mkdir -p "$OMARCHY_STATE/toggles" "$OMARCHY_STATE/indicators"
   local figlet_version="" art_sha="" art_text="" cols=0 rows=0 is_default=false idle
@@ -956,7 +976,7 @@ cmd_state() {
     --arg artSha "$art_sha" --arg artText "$art_text" \
     --argjson cols "$cols" --argjson rows "$rows" --argjson isDefault "$is_default" \
     --argjson hasOriginal "$([[ -f $ORIGINAL_ART ]] && echo true || echo false)" \
-    --argjson history "$(history_json 6)" \
+    --argjson history "$(history_json)" \
     --argjson menu "$(menu_json)" \
     --argjson budget "$(read -r c r src < <(screen_budget); budget_json "$c" "$r" "$src")" \
     '{ok: true, budget: $budget,
@@ -1035,7 +1055,7 @@ main() {
     render) cmd_render "$@" ;;
     apply) cmd_apply "$@" ;;
     restore) cmd_restore "$@" ;;
-    history) history_json | jq -c '{ok: true, history: .}' ;;
+    history) cmd_history "$@" ;;
     fonts) jq -c '{ok: true, styles: map({id, name})}' "$STYLES_JSON" ;;
     state) cmd_state ;;
     idle)

@@ -229,11 +229,28 @@ out=$(run restore not-a-sha)
 assert_eq "$(jq -r '.ok' <<<"$out")" false
 teardown
 
-setup "history is capped"
-for i in $(seq 1 24); do run apply --text "n$i" --style small >/dev/null; done
-assert_eq "$(run history | jq '.history | length')" 20
-assert_eq "$(find "$XDG_STATE_HOME/omascii/history" -name '*.txt' | wc -l)" 20 "pruned files"
+setup "history is capped at four"
+for i in $(seq 1 7); do run apply --text "n$i" --style small >/dev/null; done
+assert_eq "$(run history | jq '.history | length')" 4
+assert_eq "$(run state | jq '.history | length')" 4 "state shows more than the cap"
+assert_eq "$(find "$XDG_STATE_HOME/omascii/history" -name '*.txt' | wc -l)" 4 "pruned files"
+assert_eq "$(run history | jq -r '.history[0].label')" "n7 · Small" "newest first"
 assert_true "[[ -f '$XDG_STATE_HOME/omascii/original.txt' ]]" "original pruned"
+teardown
+
+setup "history remove deletes a previous art"
+run apply --text "one" --style small >/dev/null
+run apply --text "two" --style small >/dev/null
+old_sha=$(run history | jq -r '.history[] | select(.label == "one · Small") | .sha')
+out=$(run history remove "$old_sha")
+assert_eq "$(jq -r '.ok' <<<"$out")" true
+assert_eq "$(jq '[.history[] | select(.sha == "'"$old_sha"'")] | length' <<<"$out")" 0 "entry still listed"
+assert_true "[[ ! -e '$XDG_STATE_HOME/omascii/history/$old_sha.txt' ]]" "art file kept"
+current_sha=$(run history | jq -r '.history[] | select(.current) | .sha')
+assert_eq "$(run history remove "$current_sha" | jq -r '.ok')" false "removed the art on screen"
+assert_eq "$(run history | jq '[.history[] | select(.current)] | length')" 1
+assert_eq "$(run history remove "$(printf 'a%.0s' {1..64})" | jq -r '.ok')" false "unknown entry"
+assert_eq "$(run history remove nope | jq -r '.ok')" false "malformed sha"
 teardown
 
 # -------------------------------------------------------------------- idle

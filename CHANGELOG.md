@@ -15,7 +15,7 @@ First release.
 - Effects: switch individual ttfx effects on or off, with a preview for each. One effect loops; several play in
   random order. omascii runs the screensaver only while some effects are off, and hands it back to Omarchy otherwise
   (also when the plugin is disabled or removed).
-- Recent-art history with restore. Art set outside omascii is saved before it gets replaced.
+- Recent arts: the last 4, each with restore and remove. Art set outside omascii is saved before it gets replaced.
 - Stock screensaver/idle controls: on/off, Stay Awake, screensaver and lock delays, Lock now, Preview, Set from image,
   Edit text, Restore the Omarchy logo.
 - "Generate from Text" row under Style › Screensaver in the Omarchy menu.

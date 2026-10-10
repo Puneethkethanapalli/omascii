@@ -132,6 +132,7 @@ Item {
   }
 
   function restore(target, callback) { act(["restore", target], callback) }
+  function removeHistory(sha, callback) { act(["history", "remove", sha], callback) }
   function setScreensaverDelay(seconds) { act(["idle", "set", "--screensaver", String(seconds)]) }
   function setLockDelay(seconds) { act(["idle", "set", "--lock", String(seconds)]) }
   function setScreensaverEnabled(on) { act(["screensaver", on ? "on" : "off"]) }

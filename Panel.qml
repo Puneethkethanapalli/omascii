@@ -32,7 +32,7 @@ Panel {
   readonly property bool screensaverOff: service ? service.screensaverOff : false
   readonly property var art: service ? service.art : ({})
   readonly property var effectsCount: Model.countEffects(service ? service.effects : [])
-  readonly property var history: service ? service.history.slice(0, 5) : []
+  readonly property var history: service ? service.history : []
 
   // ------------------------------------------------------------ generator
 
@@ -181,6 +181,13 @@ Panel {
     var argv = ["bash", service.binPath, "preview"]
     if (effect) argv.push("--effect", effect)
     launchAfterClose(argv)
+  }
+
+  function removeArt(sha, label) {
+    if (!service) return
+    service.removeHistory(sha, function(ok, result, error) {
+      root.say(ok ? "Removed " + label + " from recent arts." : error, !ok)
+    })
   }
 
   function restore(target, label) {
@@ -566,7 +573,7 @@ Panel {
               Text {
                 anchors.left: thumb.right
                 anchors.leftMargin: Style.space(10)
-                anchors.right: restoreButton.left
+                anchors.right: artActions.left
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: Model.shortLabel(modelData.label, 40)
@@ -578,16 +585,32 @@ Panel {
                 font.bold: modelData.current === true
               }
 
-              Button {
-                id: restoreButton
+              Row {
+                id: artActions
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: modelData.current ? "Current" : "Restore"
-                enabled: !modelData.current
-                bordered: !modelData.current
-                foreground: modelData.current ? root.dim : root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.restore(modelData.sha, "“" + modelData.label + "”")
+                spacing: Style.space(6)
+
+                Button {
+                  visible: !modelData.current
+                  text: "Remove"
+                  iconText: "󰩹"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  tooltipText: "Delete this art from recent arts"
+                  onClicked: root.removeArt(modelData.sha, "“" + modelData.label + "”")
+                }
+
+                Button {
+                  text: modelData.current ? "Current" : "Restore"
+                  iconText: modelData.current ? "" : "󰑓"
+                  enabled: !modelData.current
+                  bordered: !modelData.current
+                  foreground: modelData.current ? root.dim : root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.restore(modelData.sha, "“" + modelData.label + "”")
+                }
               }
             }
           }

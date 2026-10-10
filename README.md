@@ -17,7 +17,7 @@ and idle settings Omarchy offers, all from the same panel.
   - The art is sized to your screens: long text wraps, and overlong words split across lines. See [Fitting the screen](#fitting-the-screen).
   - Some fonts have no digits or punctuation. A style that would drop characters from your text is marked **DROPS**, and one that can't fit is marked **TOO BIG**. Both are listed after the styles that draw your text in full.
 - **Effects.** Switch individual screensaver effects on or off, with a ▶ preview for each. With one left on it loops; with several, each cycle picks one at random. See [Effects](#effects).
-- **Recent arts.** The last arts you used, with one-click restore. Art you set another way (from an image, or by editing the file) is saved before omascii replaces it, so nothing is lost.
+- **Recent arts.** Your last 4 arts, each with **Restore** and **Remove**. Art you set another way (from an image, or by editing the file) is saved before omascii replaces it, so nothing is lost by accident.
 - **Screensaver and idle controls.** Screensaver on/off, Stay Awake, screensaver and lock delays, Lock now, Preview, Set from image, Edit text, and Restore the Omarchy logo.
 - **Bar icon.** Dims when the screensaver is off and turns your accent colour while staying awake. Right-click it to preview the screensaver.
 - **Menu entry.** Style › Screensaver › **Generate from Text** opens the panel. Turn it off with the panel's *In Omarchy menu* switch.
@@ -68,6 +68,7 @@ omascii=~/.config/omarchy/plugins/io.github.puneethkethanapalli.omascii/bin/omas
 $omascii render --text "hello" --style ansi-shadow --raw   # print the art
 $omascii apply --text "hello" --style ansi-shadow          # set it as the screensaver
 $omascii history                                           # recent arts (JSON)
+$omascii history remove SHA                                # delete one from recent arts
 $omascii restore default                                   # back to the Omarchy logo
 $omascii idle set --screensaver 300 --lock 600             # delays in seconds
 $omascii --help
